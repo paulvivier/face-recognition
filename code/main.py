@@ -32,6 +32,7 @@ def load_training_data():
     return [], []
 
 # Function to detect and crop unrecognized faces
+# Function to detect and crop unrecognized faces
 def extract_unrecognized_faces(known_encodings, known_names):
     unrecognized_faces = []
 
@@ -43,15 +44,15 @@ def extract_unrecognized_faces(known_encodings, known_names):
         try:
             image = face_recognition.load_image_file(image_path)
             
-            # Use CNN or HOG model for face detection
-            face_locations = face_recognition.face_locations(image, model='hog')
+            # Use HOG model for face detection, with upsampling to improve detection of tilted faces
+            face_locations = face_recognition.face_locations(image, model='hog', number_of_times_to_upsample=2)
             face_encodings = face_recognition.face_encodings(image, face_locations)
 
             for i, face_encoding in enumerate(face_encodings):
                 top, right, bottom, left = face_locations[i]
 
-                # Check if the face matches known faces with stricter tolerance
-                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.4)
+                # Check if the face matches known faces with a slightly higher tolerance
+                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.6)
                 if not any(matches):
                     # Crop and save the unrecognized face
                     face_image = image[top:bottom, left:right]
@@ -135,8 +136,8 @@ def retrain_model(force_retrain=False):
     # Save the encodings to a file for future use
     with open(ENCODINGS_FILE, "wb") as f:
         pickle.dump({"encodings": encodings, "names": names}, f)
+        print(f"Encodings saved to {ENCODINGS_FILE}")
 
-    print("Encodings saved to file.")
     return encodings, names
 
 def update_image_metadata(photo_dir, known_encodings, known_names):
