@@ -138,6 +138,7 @@ def retrain_model(force_retrain=False):
     return encodings, names
 
 # Function to update image metadata without overwriting existing names
+# Function to update image metadata for known faces
 def update_image_metadata(photo_dir, known_encodings, known_names):
     for image_name in os.listdir(photo_dir):
         if image_name.startswith("."):  # Ignore hidden files
@@ -156,14 +157,18 @@ def update_image_metadata(photo_dir, known_encodings, known_names):
                     match_index = matches.index(True)
                     names_in_image.append(known_names[match_index])
 
-            # Update metadata if names are found, without removing existing ones
+            # Update metadata if names are found
             if names_in_image:
+                # Get existing keywords
                 info = IPTCInfo(image_path, force=True)
-                current_keywords = info['keywords'] or []
-                updated_keywords = list(set(current_keywords + [name.encode('utf-8') for name in names_in_image]))
+                existing_keywords = info.get_all('keywords', [])
+                
+                # Add new names if they're not already present
+                updated_keywords = list(set(existing_keywords + names_in_image))  # Avoid duplicates
+                
                 info['keywords'] = updated_keywords
                 info.save_as(image_path)
-                print(f"Updated metadata for {image_name} with names: {names_in_image}")
+                print(f"Updated metadata for {image_name} with names: {updated_keywords}")
 
         except Exception as e:
             print(f"Error updating metadata for {image_name}: {e}")
