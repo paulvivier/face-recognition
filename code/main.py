@@ -1,209 +1,178 @@
 import os
-import face_recognition
 import cv2
-from pathlib import Path
-from shutil import move
-import shutil
-from iptcinfo3 import IPTCInfo
+import face_recognition
 import pickle
+from PIL import Image
+from PIL import ImageOps
+from pathlib import Path
+import iptcinfo3
+import shutil
+import numpy as np
 
-# Paths
-TRAINING_DATA_PATH = "../data/training_data/"
-PHOTO_DIR = "../data/photos/"
-CROPPED_FACES_DIR = "../data/cropped_faces/"
-ORIGINAL_DIR = "../data/original/"
+# Directories for photos and training data
+photos_dir = "../data/photos"
+training_data_dir = "../data/training_data"
+cropped_faces_dir = "../data/cropped_faces"
+encodings_file = "../data/encodings.pkl"
 
-# Create necessary directories if they don't exist
-os.makedirs(CROPPED_FACES_DIR, exist_ok=True)
-os.makedirs(ORIGINAL_DIR, exist_ok=True)
+# Load existing encodings or initialize empty list if none exist
+if os.path.exists(encodings_file):
+    with open(encodings_file, "rb") as f:
+        known_face_encodings, known_face_names = pickle.load(f)
+else:
+    known_face_encodings, known_face_names = [], []
 
-# Function to load training data
-def load_training_data():
-    if os.path.exists("../data/encodings.pkl"):
-        try:
-            with open("../data/encodings.pkl", "rb") as f:
-                data = pickle.load(f)
-            return data["encodings"], data["names"]
-        except Exception as e:
-            print(f"Error loading encodings.pkl: {e}")
-    else:
-        print("encodings.pkl file not found.")
-    return [], []
+def validate_known_encodings():
+    """Ensure all known encodings are valid numpy arrays."""
+    global known_face_encodings, known_face_names
+    valid_encodings = []
+    valid_names = []
 
-# Function to detect and crop unrecognized faces
-def extract_unrecognized_faces(known_encodings, known_names):
+    for encoding, name in zip(known_face_encodings, known_face_names):
+        if isinstance(encoding, np.ndarray):
+            valid_encodings.append(encoding)
+            valid_names.append(name)
+        else:
+            print(f"Invalid encoding detected for {name}. Skipping.")
+
+    known_face_encodings = valid_encodings
+    known_face_names = valid_names
+
+def update_metadata(image_path, names):
+    """Update the metadata with the names of the recognized faces."""
+    try:
+        info = iptcinfo3.IPTCInfo(image_path)
+        current_keywords = info.keywords or []
+        new_keywords = list(set(current_keywords + names))
+
+        # Only update if names have changed
+        if set(current_keywords) != set(new_keywords):
+            info["keywords"] = new_keywords
+            info.save()
+            print(f"Updated metadata for {os.path.basename(image_path)} with names: {new_keywords}")
+        else:
+            print(f"No update needed for {os.path.basename(image_path)}")
+    except Exception as e:
+        print(f"Error updating metadata for {os.path.basename(image_path)}: {e}")
+
+def add_face_encoding(face_image, name):
+    """Add a new face encoding to the known list, ensuring duplicates are avoided."""
+    global known_face_encodings, known_face_names
+    try:
+        face_encodings = face_recognition.face_encodings(face_image)
+        if len(face_encodings) > 0:
+            face_encoding = face_encodings[0]
+            if name not in known_face_names:
+                known_face_encodings.append(face_encoding)
+                known_face_names.append(name)
+                print(f"Added '{name}' to known encodings.")
+            else:
+                print(f"'{name}' already in known encodings. Skipping...")
+        else:
+            print("No encodings found for the provided face image.")
+    except Exception as e:
+        print(f"Error while adding face encoding for '{name}': {e}")
+
+def process_unrecognized_faces():
+    """Find and process unrecognized faces in the photos directory."""
     unrecognized_faces = []
 
-    for image_name in os.listdir(PHOTO_DIR):
-        if image_name.startswith("."):  # Ignore hidden files
-            continue
-
-        image_path = os.path.join(PHOTO_DIR, image_name)
-        try:
+    # Look for unrecognized faces
+    for image_file in os.listdir(photos_dir):
+        image_path = os.path.join(photos_dir, image_file)
+        if image_file.endswith(('.jpg', '.jpeg')):
+            print(f"Processing image: {image_file}")
             image = face_recognition.load_image_file(image_path)
-            
-            # Use CNN or HOG model for face detection
-            face_locations = face_recognition.face_locations(image, model='hog')
-            face_encodings = face_recognition.face_encodings(image, face_locations)
+            face_locations = face_recognition.face_locations(image)
+            print(f"Found {len(face_locations)} face(s) in {image_file}")
 
-            for i, face_encoding in enumerate(face_encodings):
-                top, right, bottom, left = face_locations[i]
+            if len(face_locations) > 0:
+                for i, face_location in enumerate(face_locations):
+                    top, right, bottom, left = face_location
+                    cropped_face = image[top:bottom, left:right]
+                    cropped_face_path = os.path.join(cropped_faces_dir, f"face_{i}.jpg")
+                    cropped_face_image = Image.fromarray(cropped_face)
 
-                # Check if the face matches known faces with stricter tolerance
-                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.4)
-                if not any(matches):
-                    # Crop and save the unrecognized face
-                    face_image = image[top:bottom, left:right]
-                    face_image_path = os.path.join(CROPPED_FACES_DIR, f"face_{len(unrecognized_faces)}.jpg")
-                    cv2.imwrite(face_image_path, cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR))
-                    unrecognized_faces.append(face_image_path)
+                    # Save cropped face
+                    cropped_face_image.save(cropped_face_path)
+                    print(f"Saved unrecognized face to {cropped_face_path}")
 
-        except Exception as e:
-            print(f"Error processing {image_path}: {e}")
+                    unrecognized_faces.append(cropped_face_path)
+            else:
+                print(f"No faces detected in {image_file}")
 
     return unrecognized_faces
 
-# Function to label and update training data
-def label_and_update_training_data(unrecognized_faces, known_encodings, known_names):
-    for face_path in unrecognized_faces:
-        # Display the cropped face
-        face_image = cv2.imread(face_path)
-        cv2.imshow("Unrecognized Face", face_image)
-        cv2.waitKey(1)
+def main():
+    print("Loading training data...")
 
-        # Prompt for a name
-        label = input(f"Enter the name for the face in {face_path} (or type 'unknown' to skip): ").strip()
-        cv2.destroyAllWindows()
+    # Validate encodings before proceeding
+    validate_known_encodings()
 
-        if label.lower() == "unknown":
-            print(f"Skipped face: {face_path}")
-            continue
+    unrecognized_faces = process_unrecognized_faces()
 
-        # Encode the face before moving the file
-        try:
-            image = face_recognition.load_image_file(face_path)
-            face_encoding = face_recognition.face_encodings(image)[0]
-
-            # Add encoding to the known list
-            known_encodings.append(face_encoding)
-            known_names.append(label)
-            print(f"Added '{label}' to known encodings.")
-        except IndexError:
-            print(f"No face found in {face_path}, skipping.")
-            continue
-
-        # Move to training data
-        label_dir = os.path.join(TRAINING_DATA_PATH, label)
-        os.makedirs(label_dir, exist_ok=True)
-        moved_path = os.path.join(label_dir, os.path.basename(face_path))
-        move(face_path, moved_path)
-        print(f"Moved {face_path} to {moved_path}/")
-
-# Function to retrain the model
-def retrain_model(force_retrain=False):
-    encodings, names = load_training_data()
-
-    if not force_retrain and encodings:
-        print("Loading encodings from file...")
-        return encodings, names
-
-    print("Generating new encodings from training data...")
-    encodings = []
-    names = []
-    for person_name in os.listdir(TRAINING_DATA_PATH):
-        person_path = os.path.join(TRAINING_DATA_PATH, person_name)
-        if not os.path.isdir(person_path) or person_name.startswith("."):
-            continue
-
-        for image_name in os.listdir(person_path):
-            if image_name.startswith("."):  # Ignore hidden files
+    # If there are any unrecognized faces, ask the user to identify them
+    if unrecognized_faces:
+        for face_image_path in unrecognized_faces:
+            if not os.path.exists(face_image_path):
+                print(f"Cropped face file {face_image_path} not found. Skipping...")
                 continue
 
-            image_path = os.path.join(person_path, image_name)
-            try:
-                image = face_recognition.load_image_file(image_path)
-                encoding = face_recognition.face_encodings(image)[0]
-                encodings.append(encoding)
-                names.append(person_name)
-            except IndexError:
-                print(f"Face not found in {image_path}")
-            except Exception as e:
-                print(f"Error processing {image_path}: {e}")
+            print(f"Enter the name for the face in {face_image_path} (or type 'unknown' to skip): ")
+            name = input().strip()
 
-    # Save the encodings to a file for future use
-    with open("../data/encodings.pkl", "wb") as f:
-        pickle.dump({"encodings": encodings, "names": names}, f)
+            if name != 'unknown' and name:
+                # Add new face encoding to training data
+                face_image = face_recognition.load_image_file(face_image_path)
+                add_face_encoding(face_image, name)
 
-    print("Encodings saved to file.")
-    return encodings, names
+                # Move the cropped face image to the training data directory
+                person_dir = os.path.join(training_data_dir, name)
+                os.makedirs(person_dir, exist_ok=True)
+                face_filename = os.path.basename(face_image_path)
+                shutil.move(face_image_path, os.path.join(person_dir, face_filename))
 
-# Function to update image metadata without overwriting existing names
-# Function to update image metadata for known faces
-def update_image_metadata(photo_dir, known_encodings, known_names):
-    for image_name in os.listdir(photo_dir):
-        if image_name.startswith("."):  # Ignore hidden files
-            continue
+                print(f"Moved {face_image_path} to {os.path.join(person_dir, face_filename)}")
 
-        image_path = os.path.join(photo_dir, image_name)
-        try:
-            image = face_recognition.load_image_file(image_path)
-            face_encodings = face_recognition.face_encodings(image)
+                # Retrain the model with updated encodings
+                print("Retraining the model...")
+                with open(encodings_file, "wb") as f:
+                    pickle.dump((known_face_encodings, known_face_names), f)
+                print("Model updated successfully.")
 
-            # Find matches for all faces in the image
-            names_in_image = []
-            for face_encoding in face_encodings:
-                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.4)
-                if True in matches:
-                    match_index = matches.index(True)
-                    names_in_image.append(known_names[match_index])
-
-            # Update metadata if names are found
-            if names_in_image:
-                # Get existing keywords
-                info = IPTCInfo(image_path, force=True)
-                existing_keywords = info.get_all('keywords', [])
-                
-                # Add new names if they're not already present
-                updated_keywords = list(set(existing_keywords + names_in_image))  # Avoid duplicates
-                
-                info['keywords'] = updated_keywords
-                info.save_as(image_path)
-                print(f"Updated metadata for {image_name} with names: {updated_keywords}")
-
-        except Exception as e:
-            print(f"Error updating metadata for {image_name}: {e}")
-
-# Function to clean up cropped_faces directory
-def clean_cropped_faces_dir():
-    for file_name in os.listdir(CROPPED_FACES_DIR):
-        file_path = os.path.join(CROPPED_FACES_DIR, file_name)
-        try:
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-                print(f"Deleted leftover file: {file_path}")
-        except Exception as e:
-            print(f"Error deleting file {file_path}: {e}")
-
-
-if __name__ == "__main__":
-    print("Loading training data...")
-    known_encodings, known_names = retrain_model()
-
-    print("Extracting unrecognized faces...")
-    unrecognized_faces = extract_unrecognized_faces(known_encodings, known_names)
-
-    if unrecognized_faces:
-        print(f"Found {len(unrecognized_faces)} unrecognized faces.")
-        label_and_update_training_data(unrecognized_faces, known_encodings, known_names)
-
-        print("Retraining the model...")
-        known_encodings, known_names = retrain_model()
-        print("Model updated successfully.")
-    else:
-        print("No unrecognized faces found.")
-
+    # Update metadata for all images
     print("Updating metadata for existing images...")
-    update_image_metadata(PHOTO_DIR, known_encodings, known_names)
+    for image_file in os.listdir(photos_dir):
+        image_path = os.path.join(photos_dir, image_file)
+        if image_file.endswith(('.jpg', '.jpeg')):
+            image = face_recognition.load_image_file(image_path)
+            face_locations = face_recognition.face_locations(image)
+            face_names = []
+
+            for face_location in face_locations:
+                top, right, bottom, left = face_location
+                face_encoding = face_recognition.face_encodings(image, [face_location])[0]
+
+                # Check if this face matches any known encodings
+                try:
+                    matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+                    if True in matches:
+                        first_match_index = matches.index(True)
+                        face_names.append(known_face_names[first_match_index])
+                    else:
+                        face_names.append("unknown")
+                except Exception as e:
+                    print(f"Error during face comparison: {e}")
+
+            if face_names:
+                update_metadata(image_path, face_names)
 
     print("Cleaning up cropped_faces directory...")
-    clean_cropped_faces_dir()
+    for file in os.listdir(cropped_faces_dir):
+        file_path = os.path.join(cropped_faces_dir, file)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            print(f"Deleted leftover file: {file_path}")
+
+if __name__ == "__main__":
+    main()
